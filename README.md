@@ -2,6 +2,8 @@
 
 Two identical versions of a tiny web app run side by side (blue = v1, green = v2). A single Kubernetes Service decides which one receives live traffic. Switching versions is one selector change, and rollback is the same change in reverse.
 
+#Change
+
 ```
           +-------------------+
  users -> | Service "web"     |  selector: slot=blue | slot=green
