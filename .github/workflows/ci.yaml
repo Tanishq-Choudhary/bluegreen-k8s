@@ -1,0 +1,89 @@
+name: ci-cd
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: CI - lint, build, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint shell scripts
+        run: shellcheck scripts/*.sh
+
+      - name: Build images
+        run: make build
+
+      - name: Container smoke test
+        run: |
+          docker run -d --name smoke -p 8080:8080 bluegreen-demo:green
+          for i in $(seq 1 15); do
+            curl -fsS http://localhost:8080/healthz && break
+            sleep 1
+          done
+          test "$(curl -fsS http://localhost:8080/version)" = "green v2"
+          docker rm -f smoke
+
+      - name: Save images
+        run: docker save bluegreen-demo:blue bluegreen-demo:green -o images.tar
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: images
+          path: images.tar
+          retention-days: 1
+          if-no-files-found: error
+
+  cd:
+    name: CD - deploy and blue-green switch
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: images
+
+      - name: Load images
+        run: docker load -i images.tar
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+
+      - name: Deploy blue and green
+        run: |
+          make load CLUSTER=kind
+          make deploy
+
+      - name: Verify blue is live
+        run: |
+          test "$(bash scripts/switch.sh status)" = "live: blue"
+
+      - name: Switch traffic to green
+        run: |
+          bash scripts/switch.sh green
+          test "$(bash scripts/switch.sh status)" = "live: green"
+
+      - name: Roll back to blue
+        run: |
+          bash scripts/switch.sh blue
+          test "$(bash scripts/switch.sh status)" = "live: blue"
+
+      - name: Dump cluster state on failure
+        if: failure()
+        run: kubectl -n bluegreen get all -o wide
